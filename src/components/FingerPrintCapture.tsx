@@ -3,9 +3,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Fingerprint as FingerprintIcon, X } from "lucide-react";
 import Header from "./Header";
 import NinModal from "./modals/NinModal";
+import VerificationResult from "./VerificationResult";
 import type { EnrollmentFormData } from "@/utils/types";
+import { FaCheck } from "react-icons/fa";
 
-// ✅ Single finger only (no 10-finger flow)
 const FINGERS = [{ id: "R1", name: "Right Thumb", hand: "right" }] as const;
 
 type Finger = (typeof FINGERS)[number];
@@ -28,7 +29,7 @@ const FINGER_FIELD_MAP: Record<FingerId, keyof EnrollmentFormData> = {
 function base64ToFile(
   base64: string,
   fileName: string,
-  fallbackType = "image/png"
+  fallbackType = "image/png",
 ): File {
   let mime = fallbackType;
   let data = base64;
@@ -41,7 +42,9 @@ function base64ToFile(
   const bin = atob(data);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new File([bytes], fileName || `finger-${Date.now()}.png`, { type: mime });
+  return new File([bytes], fileName || `finger-${Date.now()}.png`, {
+    type: mime,
+  });
 }
 
 const initialForm: EnrollmentFormData = {
@@ -59,7 +62,7 @@ const initialForm: EnrollmentFormData = {
 };
 
 const FingerPrintCapture: React.FC = () => {
-  const [currentFingerIndex] = useState<number>(0); // always 0 now
+  const [currentFingerIndex] = useState<number>(0); 
   const [capturedFingers, setCapturedFingers] = useState<
     Partial<Record<FingerId, FingerprintData>>
   >({});
@@ -70,17 +73,18 @@ const FingerPrintCapture: React.FC = () => {
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitDone, setSubmitDone] = useState<boolean>(false);
+  const [verifiedData, setVerifiedData] = useState<any>(null);
 
   const [showModal, setShowModal] = useState<boolean>(false);
+  const [error, setError] = useState<string>("");
 
   const currentFinger = FINGERS[currentFingerIndex];
 
   const capturedCount = useMemo(
     () => Object.keys(capturedFingers).length,
-    [capturedFingers]
+    [capturedFingers],
   );
 
-  // ✅ With single finger, "all captured" means 1 capture done
   const isCaptured = !!capturedFingers[currentFinger.id];
 
   const fetchFingerprint = async (fingerId: FingerId) => {
@@ -101,7 +105,6 @@ const FingerPrintCapture: React.FC = () => {
 
       setIsScanning(true);
 
-      // keep your scan animation delay
       setTimeout(() => {
         const file = base64ToFile(data.base64, data.imageName, "image/png");
 
@@ -125,10 +128,10 @@ const FingerPrintCapture: React.FC = () => {
       console.error("Error capturing fingerprint:", e);
       setIsCapturing(false);
       setIsScanning(false);
-      alert(
+      setError(
         `Failed to scan fingerprint: ${
           e instanceof Error ? e.message : "Unknown error"
-        }`
+        }`,
       );
     }
   };
@@ -152,33 +155,37 @@ const FingerPrintCapture: React.FC = () => {
 
       const field = FINGER_FIELD_MAP[fingerId];
       setForm((f) => ({ ...f, [field]: null }));
-
-      // ✅ If they delete the only capture, close modal
       setShowModal(false);
     } catch (e) {
       console.error("Error deleting fingerprint:", e);
     }
   };
 
-  // ✅ Auto-scan once on load (like you had before), because we only have one finger
-  useEffect(() => {
-    const id = currentFinger.id;
-    if (!capturedFingers[id] && !isCapturing) {
-      void fetchFingerprint(id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const resetForRecapture = async (fingerId: FingerId) => {
+    const fingerData = capturedFingers[fingerId];
+    if (!fingerData) return;
 
-  // ✅ When the single scan exists, open modal (only if not already open/done)
-  useEffect(() => {
-    if (isCaptured && !showModal && !submitDone) {
-      setShowModal(true);
-    }
-  }, [isCaptured, showModal, submitDone]);
+    try {
+      await fetch(`${PY_URL}/delete-fingerprint`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: fingerData.imageName,
+      });
 
-  // ✅ Submit NIN + ONE fingerprint file
+      setCapturedFingers((prev) => {
+        const copy = { ...prev };
+        delete copy[fingerId];
+        return copy;
+      });
+
+      const field = FINGER_FIELD_MAP[fingerId];
+      setForm((f) => ({ ...f, [field]: null }));
+    } catch (e) {
+      console.error("Error resetting fingerprint:", e);
+    }
+  };
+
   const handleSubmitEnrollment = async (nin: string) => {
-    // must have the captured file
     const fp = form.right_thumb;
     if (!fp) {
       alert("No fingerprint captured. Please scan again.");
@@ -192,9 +199,9 @@ const FingerPrintCapture: React.FC = () => {
       fd.append("nin", nin);
 
       // Send only the single fingerprint
-      fd.append("right_thumb", fp, fp.name || "right_thumb.png");
+      fd.append("fingerprint_image", fp, fp.name || "right_thumb.png");
 
-      const resp = await fetch(`${API_URL}/enroll`, {
+      const resp = await fetch(`${API_URL}/verify/fingerprint`, {
         method: "POST",
         body: fd,
       });
@@ -207,14 +214,15 @@ const FingerPrintCapture: React.FC = () => {
         } catch {}
         throw new Error(msg);
       }
-
-      // ✅ Success only after backend OK
+      const responseData = await resp.json();
+      console.log("Backend response:", responseData);
+      setVerifiedData(responseData);
       setSubmitDone(true);
       setShowModal(false);
     } catch (err) {
       console.error("Verify/submit failed:", err);
-      alert(
-        `Failed: ${err instanceof Error ? err.message : "Unknown error"}`
+      setError(
+        `Failed: ${err instanceof Error ? err.message : "Unknown error"}`,
       );
     } finally {
       setIsSubmitting(false);
@@ -222,52 +230,51 @@ const FingerPrintCapture: React.FC = () => {
   };
 
   if (submitDone) {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <Header currentStep={1} totalSteps={1} />
-        <div className="mx-auto flex min-h-[70vh] max-w-3xl items-center justify-center p-6">
-          <div className="w-full rounded-lg bg-white p-8 text-center shadow">
-            <h2 className="mb-2 text-2xl font-bold text-green-600">
-              Verified / Submitted!
-            </h2>
-            <p className="text-gray-600">
-              Fingerprint submitted successfully.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
+    return <VerificationResult data={verifiedData} />;
   }
 
   return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-green-50 to-blue-50 flex flex-col">
+    <div className="min-h-screen w-full bg-gray-100 flex flex-col">
       <Header currentStep={1} totalSteps={1} />
 
-      <main className="flex-1 overflow-auto">
-        <div className="mx-auto max-w-4xl p-4 md:p-6">
+      <main className="flex-1 overflow-auto flex items-center justify-center">
+        <div className="mx-auto max-w-4xl p-4 md:p-6 w-full">
           <div className="rounded-lg bg-white p-6 shadow-lg">
             <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-bold text-gray-800">
-                 Place a Finger on the Scanner
+              <div className="flex-1 text-left">
+                <h2 className="text-base sm:text-lg md:text-xl font-bold text-gray-800">
+                  Place a Finger on the Scanner
                 </h2>
-                <p className="text-gray-600">
+                <p className="text-gray-600 text-xs sm:text-sm md:text-base">
                   {isCaptured
                     ? "Fingerprint captured. Proceed to enter NIN."
-                    : "Please place your finger on the scanner."}
+                    : "Click Start to begin scanning your fingerprint."}
                 </p>
+                {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
               </div>
 
-              <div className="rounded-full bg-white px-4 py-1.5 shadow">
-                <span className="text-xs font-medium text-gray-700">
-                  Progress: {capturedCount}/{FINGERS.length}
-                </span>
-              </div>
+              {isCaptured && (
+                <div className="rounded-full bg-green-100 px-6 py-2 shadow ml-4 flex-shrink-0">
+                  <span className="text-xs sm:text-sm  font-medium text-green-700 flex items-center gap-2">
+                    <FaCheck />
+                    Captured
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center justify-center">
               <div className="relative">
-                <div className="w-64 overflow-hidden rounded-lg border-4 border-gray-300 bg-gray-50 h-[420px]">
+                <div className="
+                      w-40 h-[260px]
+                      sm:w-48 sm:h-[320px]
+                      md:w-56 md:h-[380px]
+                      lg:w-64 lg:h-[420px]
+                      overflow-hidden
+                      rounded-lg
+                      border-4 border-gray-300
+                      bg-gray-50
+                    ">
                   {isCaptured && !isScanning ? (
                     <div className="relative h-full w-full">
                       <img
@@ -275,13 +282,6 @@ const FingerPrintCapture: React.FC = () => {
                         alt={currentFinger.name}
                         className="h-full w-full object-cover"
                       />
-                      <button
-                        onClick={() => deleteFingerprint(currentFinger.id)}
-                        className="absolute -right-2 -top-2 rounded-full bg-red-500 p-2 shadow-lg hover:bg-red-600"
-                        aria-label="Delete fingerprint"
-                      >
-                        <X className="h-5 w-5 text-white" />
-                      </button>
                     </div>
                   ) : isScanning ? (
                     <div className="relative flex h-full w-full items-center justify-center bg-green-500/50">
@@ -297,22 +297,41 @@ const FingerPrintCapture: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-              <button
-                onClick={() => fetchFingerprint(currentFinger.id)}
-                disabled={isCapturing}
-                className="rounded-lg bg-green-800 px-6 py-3 text-white hover:bg-green-700 disabled:opacity-50"
-              >
-                {isCaptured ? "Recapture" : "Scan Fingerprint"}
-              </button>
-
-              {isCaptured && (
+  
+            <div className="mt-6 flex justify-center">
+              {!isCaptured ? (
                 <button
-                  onClick={() => setShowModal(true)}
-                  className="rounded-lg bg-blue-600 px-6 py-3 text-white hover:bg-blue-700"
+                  onClick={() => fetchFingerprint(currentFinger.id)}
+                  disabled={isCapturing}
+                  className="rounded-lg bg-green-600 px-8 py-3  text-xs sm:text-sm  text-white font-semibold hover:bg-green-700 disabled:opacity-50 whitespace-nowrap"
                 >
-                  Enter NIN
+                  {isCapturing ? "Scanning..." : "Start"}
                 </button>
+              ) : (
+                <div className="rounded-fullpx-6 py-2 shadow">
+                  
+                </div>
+              )}
+            </div>
+
+            <div className="mt-2 flex gap-4 items-center justify-center">
+              {isCaptured && (
+                <>
+                  <button
+                    onClick={() => resetForRecapture(currentFinger.id)}
+                    disabled={isCapturing}
+                    className="rounded-md border border-gray-300 bg-white px-6 py-4 text-xs sm:text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                  >
+                    Recapture
+                  </button>
+
+                  <button
+                    onClick={() => setShowModal(true)}
+                    className="rounded-md bg-green-100 px-6 py-4 text-xs sm:text-sm font-semibold text-green-700 hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Enter NIN
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -320,18 +339,18 @@ const FingerPrintCapture: React.FC = () => {
       </main>
 
       {isSubmitting && (
-        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/20">
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-white">
           <div className="flex flex-col items-center gap-3 rounded-xl bg-white p-6 shadow">
             <div className="h-10 w-10 animate-spin rounded-full border-b-4 border-green-600" />
             <p className="text-sm text-gray-600">Submitting…</p>
           </div>
         </div>
       )}
-
       <NinModal
         open={showModal}
         onClose={() => setShowModal(false)}
         onSubmit={handleSubmitEnrollment}
+        loading={isSubmitting}
       />
 
       <style>{`
